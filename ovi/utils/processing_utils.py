@@ -7,6 +7,7 @@ import os
 import math
 from typing import Tuple
 import pandas as pd
+from prompt_reformat import format_prompt
 
 def preprocess_image_tensor(image_path, device, target_dtype, h_w_multiple_of=32, resize_total_area=720*720):
     """Preprocess video data into standardized tensor format and (optionally) resize area."""
@@ -147,13 +148,14 @@ def validate_and_process_user_prompt(text_prompt: str, image_path: str = None) -
             raise ValueError(f"Unsupported file type: {ext}. Only .csv and .tsv are allowed.")
 
         assert "text_prompt" in df.keys() and "image_path" in df.keys(), f"Missing required columns in TSV file."
-        text_prompts = list(df["text_prompt"])
+        text_prompts = list(map(lambda t: format_prompt(str(t)), df["text_prompt"]))
         image_paths = list(df["image_path"])
 
         assert all(os.path.isfile(p) for p in image_paths), "One or more image paths in the TSV file do not exist."
     
     else:
         assert image_path is None or os.path.isfile(image_path), f"Image path is not None but {image_path} does not exist."
+        text_prompt = format_prompt(text_prompt)
         text_prompts = [text_prompt]
         image_paths = [image_path]
 
