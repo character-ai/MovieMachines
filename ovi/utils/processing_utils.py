@@ -7,7 +7,7 @@ import os
 import math
 from typing import Tuple
 import pandas as pd
-from prompt_reformat import format_prompt
+from .prompt_reformat import format_prompt
 
 def preprocess_image_tensor(image_path, device, target_dtype, h_w_multiple_of=32, resize_total_area=720*720):
     """Preprocess video data into standardized tensor format and (optionally) resize area."""
