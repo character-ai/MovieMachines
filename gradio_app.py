@@ -21,16 +21,24 @@ parser.add_argument(
     action="store_true",
     help="Enable CPU offload for both OviFusionEngine and FluxPipeline"
 )
+parser.add_argument(
+    "--fp8",
+    action="store_true",
+    help="Enable 8 bit quantization of the fusion model",
+)
 args = parser.parse_args()
 
 
 # Initialize OviFusionEngine
 enable_cpu_offload = args.cpu_offload or args.use_image_gen
 use_image_gen = args.use_image_gen
-print(f"loading model... {enable_cpu_offload=}, {use_image_gen=} for gradio demo")
-DEFAULT_CONFIG['cpu_offload'] = enable_cpu_offload # always use cpu offload if image generation is enabled
-DEFAULT_CONFIG['mode'] = "t2v"  # hardcoded since it is always cpu offloaded
-ovi_engine = OviFusionEngine()
+fp8 = args.fp8
+print(f"loading model... {enable_cpu_offload=}, {use_image_gen=}, {fp8=} for gradio demo")
+DEFAULT_CONFIG["cpu_offload"] = (
+    enable_cpu_offload  # always use cpu offload if image generation is enabled
+)
+DEFAULT_CONFIG["mode"] = "t2v"  # hardcoded since it is always cpu offloaded
+ovi_engine = OviFusionEngine(fp8=fp8)
 flux_model = None
 if use_image_gen:
     flux_model = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-Krea-dev", torch_dtype=torch.bfloat16)

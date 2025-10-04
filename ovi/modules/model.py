@@ -176,7 +176,7 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        return self._norm(x.bfloat16()).type_as(x) * self.weight
+        return self._norm(x.bfloat16()).type_as(x) * self.weight.bfloat16()
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
@@ -371,7 +371,7 @@ class ModulationAdd(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, num, dim) / dim**0.5)
 
     def forward(self, e):
-        return self.modulation + e
+        return self.modulation.bfloat16() + e.bfloat16()
 
 class WanAttentionBlock(nn.Module):
 
@@ -496,7 +496,7 @@ class Head(nn.Module):
         """
         assert e.dtype == torch.bfloat16
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2) # 1 1 2 D, B L 1 D -> B L 2 D -> 2 * (B L 1 D)
+            e = (self.modulation.bfloat16().unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2) # 1 1 2 D, B L 1 D -> B L 2 D -> 2 * (B L 1 D)
             x = (self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)))
         return x
 

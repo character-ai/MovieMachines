@@ -59,7 +59,7 @@ def init_fusion_score_model_ovi(rank: int = 0, meta_init=False):
 
     return fusion_model, video_config, audio_config
 
-def init_text_model(ckpt_dir, rank):
+def init_text_model(ckpt_dir, rank, cpu_offload=False):
     wan_dir = os.path.join(ckpt_dir, "Wan2.2-TI2V-5B")
     text_encoder_path = os.path.join(wan_dir, "models_t5_umt5-xxl-enc-bf16.pth")
     text_tokenizer_path = os.path.join(wan_dir, "google/umt5-xxl")
@@ -70,6 +70,7 @@ def init_text_model(ckpt_dir, rank):
         device=rank,
         checkpoint_path=text_encoder_path,
         tokenizer_path=text_tokenizer_path,
+        cpu_offload=cpu_offload,
         shard_fn=None)
 
 

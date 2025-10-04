@@ -22,7 +22,7 @@ from ovi.utils.processing_utils import clean_text, preprocess_image_tensor, snap
 DEFAULT_CONFIG = OmegaConf.load('ovi/configs/inference/inference_fusion.yaml')
 
 class OviFusionEngine:
-    def __init__(self, config=DEFAULT_CONFIG, device=0, target_dtype=torch.bfloat16):
+    def __init__(self, config=DEFAULT_CONFIG, device=0, target_dtype=torch.bfloat16, fp8=False):
         # Load fusion model
         self.device = device
         self.target_dtype = target_dtype
@@ -34,8 +34,13 @@ class OviFusionEngine:
         model, video_config, audio_config = init_fusion_score_model_ovi(rank=device, meta_init=meta_init)
 
         if not meta_init:
-            model = model.to(dtype=target_dtype).to(device=device if not self.cpu_offload else "cpu").eval()
-    
+            if not fp8:
+                model = model.to(dtype=target_dtype)
+            model = (
+                model.to(device=device if not self.cpu_offload else "cpu")
+                .eval()
+            )
+
         # Load VAEs
         vae_model_video = init_wan_vae_2_2(config.ckpt_dir, rank=device)
         vae_model_video.model.requires_grad_(False).eval()
@@ -47,14 +52,18 @@ class OviFusionEngine:
         self.vae_model_audio = vae_model_audio.bfloat16()
 
         # Load T5 text model
-        self.text_model = init_text_model(config.ckpt_dir, rank=device)
+        self.text_model = init_text_model(config.ckpt_dir, rank=device, cpu_offload=self.cpu_offload)
         if config.get("shard_text_model", False):
             raise NotImplementedError("Sharding text model is not implemented yet.")
         if self.cpu_offload:
             self.offload_to_cpu(self.text_model.model)
 
         # Find fusion ckpt in the same dir used by other components
-        checkpoint_path = os.path.join(config.ckpt_dir, "Ovi", "model.safetensors")
+        checkpoint_path = os.path.join(
+            config.ckpt_dir,
+            "Ovi",
+            "model.safetensors" if not fp8 else "model_fp8_e4m3fn.safetensors",
+        )
 
         if not os.path.exists(checkpoint_path):
             raise RuntimeError(f"No fusion checkpoint found in {config.ckpt_dir}")
@@ -63,7 +72,9 @@ class OviFusionEngine:
         load_fusion_checkpoint(model, checkpoint_path=checkpoint_path, from_meta=meta_init)
 
         if meta_init:
-            model = model.to(dtype=target_dtype).to(device=device if not self.cpu_offload else "cpu").eval()
+            if not fp8:
+                model = model.to(dtype=target_dtype)
+            model = model.to(device=device if not self.cpu_offload else "cpu").eval()
             model.set_rope_params()
         self.model = model
 
@@ -175,11 +186,17 @@ class OviFusionEngine:
             text_embeddings_video_neg = text_embeddings[1]
             text_embeddings_audio_neg = text_embeddings[2]
 
-            if is_i2v:              
+            if is_i2v:
+                if self.cpu_offload:
+                    self.vae_model_video.model = self.vae_model_video.model.to(
+                        self.device
+                    )
                 with torch.no_grad():
                     latents_images = self.vae_model_video.wrapped_encode(first_frame[:, :, None]).to(self.target_dtype).squeeze(0) # c 1 h w 
                 latents_images = latents_images.to(self.target_dtype)
                 video_latent_h, video_latent_w = latents_images.shape[2], latents_images.shape[3]
+                if self.cpu_offload:
+                    self.offload_to_cpu(self.vae_model_video.model)
 
             video_noise = torch.randn((self.video_latent_channel, self.video_latent_length, video_latent_h, video_latent_w), device=self.device, dtype=self.target_dtype, generator=torch.Generator(device=self.device).manual_seed(seed))  # c, f, h, w
             audio_noise = torch.randn((self.audio_latent_length, self.audio_latent_channel), device=self.device, dtype=self.target_dtype, generator=torch.Generator(device=self.device).manual_seed(seed))  # 1, l c -> l, c
@@ -191,6 +208,8 @@ class OviFusionEngine:
             
             # Sampling loop
             if self.cpu_offload:
+                self.offload_to_cpu(self.vae_model_video.model)
+                self.offload_to_cpu(self.vae_model_audio)
                 self.model = self.model.to(self.device)
             with torch.amp.autocast('cuda', enabled=self.target_dtype != torch.float32, dtype=self.target_dtype):
                 for i, (t_v, t_a) in tqdm(enumerate(zip(timesteps_video, timesteps_audio))):
@@ -247,7 +266,11 @@ class OviFusionEngine:
 
                 if self.cpu_offload:
                     self.offload_to_cpu(self.model)
-                
+                    self.vae_model_video.model = self.vae_model_video.model.to(
+                        self.device
+                    )
+                    self.vae_model_audio = self.vae_model_audio.to(self.device)
+
                 if is_i2v:
                     video_noise[:, :1] = latents_images
 
@@ -260,7 +283,9 @@ class OviFusionEngine:
                 video_latents_for_vae = video_noise.unsqueeze(0)  # 1, c, f, h, w
                 generated_video = self.vae_model_video.wrapped_decode(video_latents_for_vae)
                 generated_video = generated_video.squeeze(0).cpu().float().numpy()  # c, f, h, w
-            
+                if self.cpu_offload:
+                    self.offload_to_cpu(self.vae_model_video.model)
+                    self.offload_to_cpu(self.vae_model_audio)
             return generated_video, generated_audio, image
 
 
@@ -272,6 +297,7 @@ class OviFusionEngine:
         model = model.cpu()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
         return model
 
