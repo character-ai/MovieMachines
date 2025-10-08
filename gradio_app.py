@@ -93,7 +93,11 @@ def check_and_download_models():
             "name": "Wan2.2-TI2V-5B",
             "repo_id": "Wan-AI/Wan2.2-TI2V-5B",
             "local_dir": os.path.join(base_ckpt_dir, "Wan2.2-TI2V-5B"),
-            "allow_patterns": ["models_t5_umt5-xxl-enc-bf16.pth", "Wan2.2_VAE.pth"],
+            "allow_patterns": [
+                "google/*", # <-- Add this line back
+                "models_t5_umt5-xxl-enc-bf16.pth", 
+                "Wan2.2_VAE.pth"
+            ],
             "check_files": [
                 os.path.join(base_ckpt_dir, "Wan2.2-TI2V-5B", "models_t5_umt5-xxl-enc-bf16.pth"),
                 os.path.join(base_ckpt_dir, "Wan2.2-TI2V-5B", "Wan2.2_VAE.pth")
@@ -113,7 +117,7 @@ def check_and_download_models():
             "name": "Ovi (FP8 Quantized)",
             "repo_id": "rkfg/Ovi-fp8_quantized",
             "local_dir": os.path.join(base_ckpt_dir, "Ovi"),
-            "allow_patterns": ["model_fp8_e4m3fn.safensors"],
+            "allow_patterns": ["*.safetensors"], 
             "check_files": [os.path.join(base_ckpt_dir, "Ovi", "model_fp8_e4m3fn.safetensors")]
         }
     ]
