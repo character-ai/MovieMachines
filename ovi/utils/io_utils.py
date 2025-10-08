@@ -55,7 +55,7 @@ def save_video(
 
     # Add audio if provided
     if audio_numpy is not None:
-        with tempfile.NamedTemporaryFile(suffix=".wav", mode='wb', delete=False) as temp_audio_file:
+        with tempfile.NamedTemporaryFile(suffix=".wav") as temp_audio_file:
             wavfile.write(
                 temp_audio_file.name,
                 sample_rate,
