@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from .attention import flash_attention
+from .attention import attention
 from .tokenizers import HuggingfaceTokenizer
 from .xlm_roberta import XLMRoberta
 
@@ -82,7 +82,7 @@ class SelfAttention(nn.Module):
 
         # compute attention
         p = self.attn_dropout if self.training else 0.0
-        x = flash_attention(q, k, v, dropout_p=p, causal=self.causal, version=2)
+        x = attention(q, k, v, dropout_p=p, causal=self.causal, version=2)
         # x = flash_attention(q, k, v, dropout_p=p, causal=self.causal)
         x = x.reshape(b, s, c)
 
@@ -195,7 +195,7 @@ class AttentionPool(nn.Module):
         k, v = self.to_kv(x).view(b, s, 2, n, d).unbind(2)
 
         # compute attention
-        x = flash_attention(q, k, v, version=2)
+        x = attention(q, k, v, version=2)
         # x = flash_attention(q, k, v)
 
         x = x.reshape(b, 1, c)

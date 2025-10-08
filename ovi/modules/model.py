@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
-from .attention import flash_attention
+from .attention import attention
 from torch.utils.checkpoint import checkpoint
 from ovi.distributed_comms.communications import all_gather, all_to_all_4D
 from ovi.distributed_comms.parallel_states import nccl_info, get_sequence_parallel_state
@@ -250,7 +250,7 @@ class WanSelfAttention(nn.Module):
             q = all_to_all_4D(q, scatter_dim=2, gather_dim=1)
             k = all_to_all_4D(k, scatter_dim=2, gather_dim=1)
             v = all_to_all_4D(v, scatter_dim=2, gather_dim=1) # [B, L, H/P, C/H]
-        x = flash_attention(
+        x = attention(
             q=rope_apply(q, grid_sizes, freqs),
             k=rope_apply(k, grid_sizes, freqs),
             v=v,
@@ -286,7 +286,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         q, k, v = self.qkv_fn(x, context)
 
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        x = attention(q, k, v, k_lens=context_lens)
 
         # output
         x = x.flatten(2)
@@ -345,9 +345,9 @@ class WanI2VCrossAttention(WanSelfAttention):
             
         # [B, L, H/P, C/H]
         # k_img: [B, L, H, C/H]
-        img_x = flash_attention(q, k_img, v_img, k_lens=None)
+        img_x = attention(q, k_img, v_img, k_lens=None)
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        x = attention(q, k, v, k_lens=context_lens)
         if self.use_sp: 
             # print(f"[DEBUG SP] Doing all to all to shard sequence")
             x = all_to_all_4D(x, scatter_dim=1, gather_dim=2) # [B, L/P, H, C/H]

@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from ovi.modules.model import WanLayerNorm, WanModel, WanRMSNorm, gradient_checkpointing, rope_apply
-from ovi.modules.attention import flash_attention
+from ovi.modules.attention import attention
 from ovi.distributed_comms.communications import all_gather, all_to_all_4D
 from ovi.distributed_comms.parallel_states import nccl_info, get_sequence_parallel_state
 
@@ -100,10 +100,10 @@ class FusionModel(nn.Module):
             if v_img is not None:
                 v_img = torch.chunk(v_img, self.sp_size, dim=2)[self.sp_rank]
             
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        x = attention(q, k, v, k_lens=context_lens)
 
         if k_img is not None:
-            img_x = flash_attention(q, k_img, v_img, k_lens=None)
+            img_x = attention(q, k_img, v_img, k_lens=None)
             x = x + img_x
 
         is_vid = src_grid_sizes.shape[1] > 1
@@ -118,7 +118,7 @@ class FusionModel(nn.Module):
         q = rope_apply(q, src_grid_sizes, src_freqs)
         k_target = rope_apply(k_target, target_grid_sizes, target_freqs)
         
-        target_x = flash_attention(q, k_target, v_target, k_lens=target_seq_lens)
+        target_x = attention(q, k_target, v_target, k_lens=target_seq_lens)
         
         x = x + target_x
         if self.use_sp:
