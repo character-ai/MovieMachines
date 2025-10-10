@@ -2,7 +2,7 @@
 import logging
 
 import torch
-import torch.amp as amp
+import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
@@ -672,14 +672,14 @@ class WanVAE:
         """
         videos: A list of videos each with shape [C, T, H, W].
         """
-        with amp.autocast('cuda', dtype=self.dtype):
+        with amp.autocast(dtype=self.dtype):
             return [
                 self.model.encode(u.unsqueeze(0), self.scale).float().squeeze(0)
                 for u in videos
             ]
 
     def decode(self, zs):
-        with amp.autocast('cuda', dtype=self.dtype):
+        with amp.autocast(dtype=self.dtype):
             return [
                 self.model.decode(u.unsqueeze(0),
                                   self.scale).float().clamp_(-1, 1).squeeze(0)
@@ -688,16 +688,16 @@ class WanVAE:
 
     @torch.no_grad()
     def wrapped_decode(self, z):
-        with amp.autocast('cuda', dtype=self.dtype):
+        with torch.amp.autocast('cuda', dtype=self.dtype):
             return self.model.decode(z, self.scale).float().clamp_(-1, 1)
 
     @torch.no_grad()
     def wrapped_decode_stream(self, z):
-        with amp.autocast('cuda', dtype=self.dtype):
+        with torch.amp.autocast('cuda', dtype=self.dtype):
             return self.model.decode_stream(z, self.scale).float().clamp_(-1, 1)
 
     @torch.no_grad()
     def wrapped_encode(self, video):
-        with amp.autocast('cuda', dtype=self.dtype):
+        with torch.amp.autocast('cuda', dtype=self.dtype):
             return self.model.encode(video, self.scale).float()
         

@@ -2,7 +2,7 @@
 import math
 
 import torch
-import torch.amp as amp
+import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -34,7 +34,7 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
-@amp.autocast('cuda', enabled=False)
+@amp.autocast(enabled=False)
 def rope_params(max_seq_len, dim, theta=10000, freqs_scaling=1.0):
     assert dim % 2 == 0
     pos =  torch.arange(max_seq_len)
@@ -44,7 +44,7 @@ def rope_params(max_seq_len, dim, theta=10000, freqs_scaling=1.0):
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
-@amp.autocast('cuda', enabled=False)
+@amp.autocast(enabled=False)
 def rope_apply_1d(x, grid_sizes, freqs):
     n, c = x.size(2), x.size(3) // 2 ## b l h d
     c_rope = freqs.shape[1]  # number of complex dims to rotate
@@ -69,7 +69,7 @@ def rope_apply_1d(x, grid_sizes, freqs):
         output.append(x_i)
     return torch.stack(output).bfloat16()
 
-@amp.autocast('cuda', enabled=False)
+@amp.autocast(enabled=False)
 def rope_apply_3d(x, grid_sizes, freqs):
     n, c = x.size(2), x.size(3) // 2
 
@@ -99,7 +99,7 @@ def rope_apply_3d(x, grid_sizes, freqs):
         output.append(x_i)
     return torch.stack(output).bfloat16()
 
-@amp.autocast('cuda', enabled=False)
+@amp.autocast(enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     x_ndim = grid_sizes.shape[-1]
     if x_ndim == 3:
@@ -447,7 +447,7 @@ class WanAttentionBlock(nn.Module):
         """
         assert e.dtype == torch.bfloat16
         assert len(e.shape) == 4 and e.size(2) == 6 and e.shape[1] == x.shape[1], f"{e.shape}, {x.shape}"
-        with amp.autocast('cuda', dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             e = self.modulation(e).chunk(6, dim=2)
         assert e[0].dtype == torch.bfloat16
 
@@ -455,7 +455,7 @@ class WanAttentionBlock(nn.Module):
         y = self.self_attn(
             self.norm1(x).bfloat16() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
             seq_lens, grid_sizes, freqs)
-        with amp.autocast('cuda', dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             x = x + y * e[2].squeeze(2)
 
         # cross-attention & ffn function
@@ -463,7 +463,7 @@ class WanAttentionBlock(nn.Module):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
             y = self.ffn(
                 self.norm2(x).bfloat16() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
-            with amp.autocast('cuda', dtype=torch.bfloat16):
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 x = x + y * e[5].squeeze(2)
             return x
 
@@ -495,7 +495,7 @@ class Head(nn.Module):
             e(Tensor): Shape [B, L, C]
         """
         assert e.dtype == torch.bfloat16
-        with amp.autocast('cuda', dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             e = (self.modulation.bfloat16().unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2) # 1 1 2 D, B L 1 D -> B L 2 D -> 2 * (B L 1 D)
             x = (self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)))
         return x
@@ -740,7 +740,7 @@ class WanModel(ModelMixin, ConfigMixin):
                 # print(f"zeroing out first {_first_images_seq_len} from t: {t.shape}, {t}")
             else:
                 t = t.unsqueeze(1).expand(t.size(0), seq_len)
-        with amp.autocast('cuda', dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             bt = t.size(0)
             t = t.flatten()
             e = self.time_embedding(
