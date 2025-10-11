@@ -1,16 +1,145 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+
+# Standard library imports
+import itertools
+import math
 import logging
 
+# Third-party library imports
 import torch
-import torch.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-__all__ = [
-    "Wan2_2_VAE",
-]
+# --- Tiling Utilities ---
+# The following functions (get_tiled_scale_steps, tiled_scale_multidim, tiled_scale)
+# are sourced from the ComfyUI project by comfyanonymous.
+# Source: https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/utils.py
 
+
+def get_tiled_scale_steps(width, height, tile_x, tile_y, overlap):
+    rows = 1 if height <= tile_y else math.ceil((height - overlap) / (tile_y - overlap))
+    cols = 1 if width <= tile_x else math.ceil((width - overlap) / (tile_x - overlap))
+    return rows * cols
+
+@torch.inference_mode()
+def tiled_scale_multidim(samples, function, tile=(64, 64), overlap=8, upscale_amount=4, out_channels=3, output_device="cpu", downscale=False, index_formulas=None, pbar=None):
+    dims = len(tile)
+
+    if not (isinstance(upscale_amount, (tuple, list))):
+        upscale_amount = [upscale_amount] * dims
+
+    if not (isinstance(overlap, (tuple, list))):
+        overlap = [overlap] * dims
+
+    if index_formulas is None:
+        index_formulas = upscale_amount
+
+    if not (isinstance(index_formulas, (tuple, list))):
+        index_formulas = [index_formulas] * dims
+
+    def get_upscale(dim, val):
+        up = upscale_amount[dim]
+        if callable(up):
+            return up(val)
+        else:
+            return up * val
+
+    def get_downscale(dim, val):
+        up = upscale_amount[dim]
+        if callable(up):
+            return up(val)
+        else:
+            return val / up
+
+    def get_upscale_pos(dim, val):
+        up = index_formulas[dim]
+        if callable(up):
+            return up(val)
+        else:
+            return up * val
+
+    def get_downscale_pos(dim, val):
+        up = index_formulas[dim]
+        if callable(up):
+            return up(val)
+        else:
+            return val / up
+
+    if downscale:
+        get_scale = get_downscale
+        get_pos = get_downscale_pos
+    else:
+        get_scale = get_upscale
+        get_pos = get_upscale_pos
+
+    def mult_list_upscale(a):
+        out = []
+        for i in range(len(a)):
+            out.append(round(get_scale(i, a[i])))
+        return out
+
+    output = torch.empty([samples.shape[0], out_channels] + mult_list_upscale(samples.shape[2:]), device=output_device)
+
+    for b in range(samples.shape[0]):
+        s = samples[b:b+1]
+
+        # handle entire input fitting in a single tile
+        if all(s.shape[d+2] <= tile[d] for d in range(dims)):
+            output[b:b+1] = function(s).to(output_device)
+            if pbar is not None:
+                pbar.update(1)
+            continue
+
+        out = torch.zeros([s.shape[0], out_channels] + mult_list_upscale(s.shape[2:]), device=output_device)
+        out_div = torch.zeros([s.shape[0], out_channels] + mult_list_upscale(s.shape[2:]), device=output_device)
+
+        positions = [range(0, s.shape[d+2] - overlap[d], tile[d] - overlap[d]) if s.shape[d+2] > tile[d] else [0] for d in range(dims)]
+
+        for it in itertools.product(*positions):
+            s_in = s
+            upscaled = []
+
+            for d in range(dims):
+                pos = max(0, min(s.shape[d + 2] - overlap[d], it[d]))
+                l = min(tile[d], s.shape[d + 2] - pos)
+                s_in = s_in.narrow(d + 2, pos, l)
+                upscaled.append(round(get_pos(d, pos)))
+
+            ps = function(s_in).to(output_device)
+            mask = torch.ones_like(ps)
+
+            for d in range(2, dims + 2):
+                feather = round(get_scale(d - 2, overlap[d - 2]))
+                if feather >= mask.shape[d]:
+                    continue
+                for t in range(feather):
+                    a = (t + 1) / feather
+                    mask.narrow(d, t, 1).mul_(a)
+                    mask.narrow(d, mask.shape[d] - 1 - t, 1).mul_(a)
+
+            o = out
+            o_d = out_div
+            for d in range(dims):
+                o = o.narrow(d + 2, upscaled[d], mask.shape[d + 2])
+                o_d = o_d.narrow(d + 2, upscaled[d], mask.shape[d + 2])
+
+            o.add_(ps * mask)
+            o_d.add_(mask)
+
+            if pbar is not None:
+                pbar.update(1)
+
+        output[b:b+1] = out/out_div
+    return output
+
+def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap = 8, upscale_amount = 4, out_channels = 3, output_device="cpu", pbar = None):
+    return tiled_scale_multidim(samples, function, (tile_y, tile_x), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=output_device, pbar=pbar)
+
+
+# --- Start of Original vae2_2.py Code ---
+
+__all__ = ["Wan2_2_VAE"]
 CACHE_T = 2
 
 
@@ -878,12 +1007,20 @@ def _video_vae(pretrained_path=None, z_dim=16, dim=160, device="cpu", **kwargs):
         model = WanVAE_(**cfg)
 
     # load checkpoint
-    logging.info(f"loading {pretrained_path}")
+    # print(f"loading {pretrained_path}")
     model.load_state_dict(
         torch.load(pretrained_path, map_location=device, weights_only=True), assign=True)
 
     return model
 
+
+# --- Ovi Enhancements ---
+# The following Wan2_2_VAE class is an enhanced wrapper for the original model.
+# It adds features for memory efficiency and pipeline integration, including:
+#   - Tiled VAE decoding to reduce VRAM usage.
+#   - Device-awareness (.to, .cpu, .cuda) for ModelManager compatibility.
+#   - A .parameters() method for compatibility with standard PyTorch tools.
+#   - Encode/decode methods to handle single tensors instead of lists.
 
 class Wan2_2_VAE:
 
@@ -903,174 +1040,151 @@ class Wan2_2_VAE:
 
         mean = torch.tensor(
             [
-                -0.2289,
-                -0.0052,
-                -0.1323,
-                -0.2339,
-                -0.2799,
-                0.0174,
-                0.1838,
-                0.1557,
-                -0.1382,
-                0.0542,
-                0.2813,
-                0.0891,
-                0.1570,
-                -0.0098,
-                0.0375,
-                -0.1825,
-                -0.2246,
-                -0.1207,
-                -0.0698,
-                0.5109,
-                0.2665,
-                -0.2108,
-                -0.2158,
-                0.2502,
-                -0.2055,
-                -0.0322,
-                0.1109,
-                0.1567,
-                -0.0729,
-                0.0899,
-                -0.2799,
-                -0.1230,
-                -0.0313,
-                -0.1649,
-                0.0117,
-                0.0723,
-                -0.2839,
-                -0.2083,
-                -0.0520,
-                0.3748,
-                0.0152,
-                0.1957,
-                0.1433,
-                -0.2944,
-                0.3573,
-                -0.0548,
-                -0.1681,
-                -0.0667,
+                -0.2289, -0.0052, -0.1323, -0.2339, -0.2799, 0.0174, 0.1838,
+                0.1557, -0.1382, 0.0542, 0.2813, 0.0891, 0.1570, -0.0098,
+                0.0375, -0.1825, -0.2246, -0.1207, -0.0698, 0.5109, 0.2665,
+                -0.2108, -0.2158, 0.2502, -0.2055, -0.0322, 0.1109, 0.1567,
+                -0.0729, 0.0899, -0.2799, -0.1230, -0.0313, -0.1649, 0.0117,
+                0.0723, -0.2839, -0.2083, -0.0520, 0.3748, 0.0152, 0.1957,
+                0.1433, -0.2944, 0.3573, -0.0548, -0.1681, -0.0667,
             ],
             dtype=dtype,
             device=device,
         )
         std = torch.tensor(
             [
-                0.4765,
-                1.0364,
-                0.4514,
-                1.1677,
-                0.5313,
-                0.4990,
-                0.4818,
-                0.5013,
-                0.8158,
-                1.0344,
-                0.5894,
-                1.0901,
-                0.6885,
-                0.6165,
-                0.8454,
-                0.4978,
-                0.5759,
-                0.3523,
-                0.7135,
-                0.6804,
-                0.5833,
-                1.4146,
-                0.8986,
-                0.5659,
-                0.7069,
-                0.5338,
-                0.4889,
-                0.4917,
-                0.4069,
-                0.4999,
-                0.6866,
-                0.4093,
-                0.5709,
-                0.6065,
-                0.6415,
-                0.4944,
-                0.5726,
-                1.2042,
-                0.5458,
-                1.6887,
-                0.3971,
-                1.0600,
-                0.3943,
-                0.5537,
-                0.5444,
-                0.4089,
-                0.7468,
-                0.7744,
+                0.4765, 1.0364, 0.4514, 1.1677, 0.5313, 0.4990, 0.4818,
+                0.5013, 0.8158, 1.0344, 0.5894, 1.0901, 0.6885, 0.6165,
+                0.8454, 0.4978, 0.5759, 0.3523, 0.7135, 0.6804, 0.5833,
+                1.4146, 0.8986, 0.5659, 0.7069, 0.5338, 0.4889, 0.4917,
+                0.4069, 0.4999, 0.6866, 0.4093, 0.5709, 0.6065, 0.6415,
+                0.4944, 0.5726, 1.2042, 0.5458, 1.6887, 0.3971, 1.0600,
+                0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744,
             ],
             dtype=dtype,
             device=device,
         )
-        self.scale = [mean, 1.0 / std]
 
-        # init model
-        self.model = (
-            _video_vae(
-                pretrained_path=vae_pth,
-                z_dim=z_dim,
-                dim=c_dim,
-                dim_mult=dim_mult,
-                temperal_downsample=temperal_downsample,
-            ).eval().requires_grad_(False).to(device))
+        self.scale = [mean.to(dtype=dtype, device=device), (1.0 / std).to(dtype=dtype, device=device)]
 
-    def encode(self, videos):
-        try:
-            if not isinstance(videos, list):
-                raise TypeError("videos should be a list")
-            with amp.autocast('cuda', dtype=self.dtype):
-                return [
-                    self.model.encode(u.unsqueeze(0),
-                                      self.scale).float().squeeze(0)
-                    for u in videos
-                ]
-        except TypeError as e:
-            logging.info(e)
-            return None
+        self.model = (_video_vae(pretrained_path=vae_pth, z_dim=z_dim, dim=c_dim, dim_mult=dim_mult,
+                                 temperal_downsample=temperal_downsample, device=device)
+                      .eval().requires_grad_(False))
 
-    def decode(self, zs):
-        try:
-            if not isinstance(zs, list):
-                raise TypeError("zs should be a list")
-            with amp.autocast('cuda', dtype=self.dtype):
-                return [
-                    self.model.decode(u.unsqueeze(0),
-                                      self.scale).float().clamp_(-1,
-                                                                 1).squeeze(0)
-                    for u in zs
-                ]
-        except TypeError as e:
-            logging.info(e)
-            return None
+        # Ensure model and scale tensors are on the correct initial device and dtype
+        self.model = self.model.to(dtype=self.dtype)
+        self.to(device)
+
+    def to(self, device):
+        device = device if isinstance(device, torch.device) else torch.device(device)
+        self.model.to(device)
+        self.scale = [t.to(device) for t in self.scale]
+        self.device = device
+        return self
+
+    def cpu(self):
+        return self.to(torch.device('cpu'))
+
+    def cuda(self, device=None):
+        device = torch.device('cuda') if device is None else (device if isinstance(device, torch.device) else torch.device(device))
+        return self.to(device)
+
+    def parameters(self, recurse: bool = True):
+        return self.model.parameters(recurse=recurse)
 
     def wrapped_decode(self, zs):
         try:
             if not isinstance(zs, torch.Tensor):
                 raise TypeError("zs should be a torch.Tensor")
-            with amp.autocast('cuda', dtype=self.dtype):
-                return self.model.decode(zs, self.scale).float().clamp_(-1,
-                                                                 1)
-
-        except TypeError as e:
-            logging.info(e)
+            with torch.amp.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                return self.model.decode(zs, self.scale).float().clamp_(-1, 1)
+        except Exception as e:
+            logging.error(f"wrapped_decode failed: {e}")
             return None
-        
+
     def wrapped_encode(self, video):
         try:
             if not isinstance(video, torch.Tensor):
                 raise TypeError("video should be a torch.Tensor")
-            with amp.autocast('cuda', dtype=self.dtype):
-                
+            with torch.amp.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
                 return self.model.encode(video, self.scale).float()
-
-        except TypeError as e:
-            logging.info(e)
+        except Exception as e:
+            logging.error(f"wrapped_encode failed: {e}")
             return None
-        
+            
+    def wrapped_decode_tiled(self, zs, tile_x=32, tile_y=32, overlap_x=8, overlap_y=8, progress_bar=None):
+        if not isinstance(zs, torch.Tensor):
+            raise TypeError("Input 'zs' must be a torch.Tensor")
+
+        # This internal function replicates the VAE decoding process but stops
+        # *before* the final `unpatchify` step. This allows us to tile the
+        # most memory-intensive part of the operation on the 12-channel patched data.
+        def decode_patched(tile_tensor):
+            self.model.clear_cache()
+
+            # Replicate the scaling logic from the original decode method
+            z = tile_tensor
+            if isinstance(self.scale[0], torch.Tensor):
+                z = z / self.scale[1].view(1, self.model.z_dim, 1, 1, 1) + self.scale[0].view(1, self.model.z_dim, 1, 1, 1)
+            else:
+                z = z / self.scale[1] + self.scale[0]
+
+            # Replicate the core decode loop
+            iter_ = z.shape[2]
+            x = self.model.conv2(z)
+            out = None
+            for i in range(iter_):
+                self.model._conv_idx = [0]
+                chunk_to_decode = x[:, :, i:i + 1, :, :]
+                first_chunk_flag = (i == 0)
+
+                decoded_chunk = self.model.decoder(
+                    chunk_to_decode,
+                    feat_cache=self.model._feat_map,
+                    feat_idx=self.model._conv_idx,
+                    first_chunk=first_chunk_flag
+                )
+
+                if out is None:
+                    out = decoded_chunk
+                else:
+                    out = torch.cat([out, decoded_chunk], 2)
+            return out
+
+        try:
+            # --- Measure-Then-Tile Strategy ---
+            # The VAE's temporal upscaling is non-uniform and complex. To ensure the tiler
+            # works correctly, we first decode a small test tile to measure the *actual*
+            # upscale ratio of the patched representation.
+            test_tile = zs[:, :, :, :min(8, zs.shape[3]), :min(8, zs.shape[4])]
+            test_result = decode_patched(test_tile)
+
+            input_t, input_h, input_w = test_tile.shape[2:]
+            output_t, output_h, output_w = test_result.shape[2:]
+
+            temporal_upscale = output_t / input_t
+            spatial_upscale = round(output_h / input_h) # Spatial is a clean integer upscale
+
+            # logging.info(f"[VAE] Measured patched-to-patched upscale ratios: Temporal={temporal_upscale:.2f}x, Spatial={spatial_upscale}x")
+
+            tile_t, overlap_t = zs.shape[2], 0 # Process the full temporal length in each tile
+
+            with torch.amp.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                decoded_patched_video = tiled_scale_multidim(
+                    samples=zs,
+                    function=decode_patched,
+                    tile=(tile_t, tile_y, tile_x),
+                    overlap=(overlap_t, overlap_y, overlap_x),
+                    upscale_amount=(temporal_upscale, spatial_upscale, spatial_upscale),
+                    out_channels=12,
+                    output_device="cpu", # Tile results to CPU to conserve VRAM
+                    pbar=progress_bar
+                )
+
+            # After the entire tiled operation is complete, unpatch the result.
+            final_video = unpatchify(decoded_patched_video, patch_size=2)
+            return final_video.float().clamp_(-1, 1)
+
+        except Exception as e:
+            logging.error(f"Error during tiled VAE decoding: {e}\n{traceback.format_exc()}")
+            return None

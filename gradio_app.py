@@ -1,21 +1,36 @@
+# Standard library imports
+import argparse
+import asyncio
+import logging
+import os
+import platform
+import random
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from functools import wraps
+
+# Third-party library imports
 import gradio as gr
 import torch
-import argparse
-from ovi.ovi_fusion_engine import OviFusionEngine, DEFAULT_CONFIG
-from diffusers import FluxPipeline
-import tempfile
-from ovi.utils.io_utils import save_video
-from ovi.utils.processing_utils import clean_text, scale_hw_to_area_divisible
-import os
-import uuid
-import random
-from datetime import datetime
-import subprocess
-import platform
-import shutil
-from PIL import Image
 from huggingface_hub import snapshot_download
 
+# Local project imports
+from ovi.ovi_fusion_engine import OviFusionEngine, DEFAULT_CONFIG
+from ovi.utils.io_utils import save_video
+from ovi.utils.processing_utils import clean_text, scale_hw_to_area_divisible
+
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.setLevel(logging.WARNING)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Ensure logs go to the console
+)    
+    
 # Try to suppress annoyingly persistent Windows asyncio proactor errors
 if os.name == 'nt':  # Windows only
     import asyncio
@@ -66,16 +81,25 @@ parser.add_argument(
     action="store_true",
     help="Enable image generation UI with FluxPipeline"
 )
-parser.add_argument(
-    "--cpu_offload",
-    action="store_true",
-    help="Enable CPU offload for both OviFusionEngine and FluxPipeline"
-)
+# parser.add_argument(
+    # "--cpu_offload",
+    # action="store_true",
+    # help="Enable CPU offload for both OviFusionEngine and FluxPipeline"
+# )
 parser.add_argument(
     "--fp8",
     action="store_true",
     help="Enable 8 bit quantization of the fusion model",
 )
+parser.add_argument(
+    "--qint8",
+    action="store_true",
+    help="Enable 8 bit quantization of the fusion model. No need to download additional models.",
+)
+parser.add_argument("--server_name", type=str, default="127.0.0.1", help="IP address, LAN access changed to 0.0.0.0")
+parser.add_argument("--server_port", type=int, default=7891, help="Use port")
+parser.add_argument("--share", action="store_true", help="Enable gradio sharing")
+parser.add_argument("--mcp_server", action="store_true", help="Enable MCP service")
 args = parser.parse_args()
 
 # ----------------------------
@@ -87,14 +111,13 @@ def check_and_download_models():
     """
     base_ckpt_dir = "./ckpts"
     
-    # This dictionary structure remains the same
     models_to_check = [
         {
             "name": "Wan2.2-TI2V-5B",
             "repo_id": "Wan-AI/Wan2.2-TI2V-5B",
             "local_dir": os.path.join(base_ckpt_dir, "Wan2.2-TI2V-5B"),
             "allow_patterns": [
-                "google/*", # <-- Add this line back
+                "google/*",
                 "models_t5_umt5-xxl-enc-bf16.pth", 
                 "Wan2.2_VAE.pth"
             ],
@@ -113,14 +136,28 @@ def check_and_download_models():
                 os.path.join(base_ckpt_dir, "MMAudio", "ext_weights", "v1-16.pth")
             ]
         },
-        {
+    ]
+    
+    # Conditionally add the correct Ovi model to the download list
+    if args.fp8:
+        # User has requested the pre-quantized FP8 model
+        ovi_model_to_check = {
             "name": "Ovi (FP8 Quantized)",
             "repo_id": "rkfg/Ovi-fp8_quantized",
             "local_dir": os.path.join(base_ckpt_dir, "Ovi"),
             "allow_patterns": ["*.safetensors"], 
             "check_files": [os.path.join(base_ckpt_dir, "Ovi", "model_fp8_e4m3fn.safetensors")]
         }
-    ]
+    else:
+        # User is running in standard or qint8 mode, which requires the full model
+        ovi_model_to_check = {
+            "name": "Ovi (Full Model)",
+            "repo_id": "chetwinlow1/Ovi",
+            "local_dir": os.path.join(base_ckpt_dir, "Ovi"),
+            "allow_patterns": ["model.safetensors"],
+            "check_files": [os.path.join(base_ckpt_dir, "Ovi", "model.safetensors")]
+        }
+    models_to_check.append(ovi_model_to_check)
     
     print()
     print("--- Checking for required model weights ---")
@@ -158,24 +195,25 @@ def check_and_download_models():
 check_and_download_models()
 
 # Initialize OviFusionEngine
-enable_cpu_offload = args.cpu_offload or args.use_image_gen
 use_image_gen = args.use_image_gen
 fp8 = args.fp8
-print(f"loading model... {enable_cpu_offload=}, {use_image_gen=}, {fp8=} for gradio demo")
-DEFAULT_CONFIG["cpu_offload"] = (
-    enable_cpu_offload  # always use cpu offload if image generation is enabled
-)
-DEFAULT_CONFIG["mode"] = "t2v"  # hardcoded since it is always cpu offloaded
+qint8 = args.qint8
+print(f"Starting Gradio UI... {use_image_gen=}, {fp8=}, {qint8=}")
+
+# Configuration for cpu_offload is no longer needed. The engine handles it internally.
+if use_image_gen:
+    DEFAULT_CONFIG["mode"] = "t2i2v"
+else:
+    DEFAULT_CONFIG["mode"] = "t2v"
+    
 DEFAULT_CONFIG["fp8"] = fp8
+DEFAULT_CONFIG["qint8"] = qint8
 ovi_engine = OviFusionEngine()
 flux_model = None
 
-# if fp8:
-    # assert not use_image_gen, "Image generation with FluxPipeline is not supported with fp8 quantization. This is because if you are unable to run the bf16 model, you likely cannot run image gen model"
-    
 if use_image_gen:
     flux_model = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-Krea-dev", torch_dtype=torch.bfloat16)
-    flux_model.enable_model_cpu_offload() #save some VRAM by offloading the model to CPU. Remove this if you have enough GPU VRAM
+    flux_model.enable_model_cpu_offload()
 print("loaded model")
 
 
@@ -194,6 +232,9 @@ def generate_video(
     video_negative_prompt,
     audio_negative_prompt,
     autosave_video,
+    resolution_budget,
+    video_duration,
+    use_tiled_vae     
 ):
     try:
         image_path = None
@@ -202,10 +243,28 @@ def generate_video(
 
         video_frame_height_width = [video_height, video_width]
         
+        # Parse the resolution budget from the radio button string
+        if "960" in resolution_budget:
+            budget_value = "960"
+        elif "832" in resolution_budget:
+            budget_value = "832"
+        else: # Default to Standard 720
+            budget_value = "720"
+        
+        # --- Dynamic Latent Length Calculation ---
+        # Ratios derived from the 5s baseline (31 video, 157 audio)
+        video_latents_per_second = 31 / 5.0  # 6.2
+        audio_latents_per_second = 157 / 5.0 # 31.4
+
+        # Calculate latent lengths based on the slider value and round to the nearest integer
+        vid_len = int(round(video_duration * video_latents_per_second))
+        aud_len = int(round(video_duration * audio_latents_per_second))
+        
         generated_video, generated_audio, _ = ovi_engine.generate(
             text_prompt=text_prompt,
             image_path=image_path,
             video_frame_height_width=video_frame_height_width,
+            resolution_budget=budget_value,
             seed=video_seed,
             solver_name=solver_name,
             sample_steps=sample_steps,
@@ -215,6 +274,10 @@ def generate_video(
             slg_layer=slg_layer,
             video_negative_prompt=video_negative_prompt,
             audio_negative_prompt=audio_negative_prompt,
+            use_tiled_vae=use_tiled_vae,
+            vae_tile_size=32,            
+            video_latent_length=vid_len,
+            audio_latent_length=aud_len,
         )
 
         # file naming with timestamp
@@ -235,7 +298,8 @@ def generate_video(
 
     except Exception as e:
         print(f"Error during video generation: {e}")
-        return None, video_seed
+        # The gr.Video component expects a single path, not a tuple.
+        return None
 
 def prepare_video_seed(randomize_seed, current_seed):
     """
@@ -283,14 +347,20 @@ def save_video_manually(video_path):
 def open_output_folder():
     folder_path = os.path.abspath("outputs")
     if platform.system() == "Windows":
-        os.startfile(folder_path)
+        subprocess.run(["explorer", folder_path])
     elif platform.system() == "Darwin": # macOS
         subprocess.Popen(["open", folder_path])
     else: # Linux
         subprocess.Popen(["xdg-open", folder_path])
     return "Opened output folder."
 
-
+def unload_models_from_ram():
+    """Wrapper function to be called by the Gradio button."""
+    if ovi_engine:
+        ovi_engine.unload_models()
+        return "Models unloaded from RAM. Ready for post-processing or other tasks."
+    return "Engine not initialized."
+    
 css = """
 .video-size video, 
 .video-size img {
@@ -389,20 +459,43 @@ with gr.Blocks(css=css) as demo:
                             video_height = gr.Slider(minimum=256, maximum=1024, value=512, step=32, label="Video Height")
                             video_width = gr.Slider(minimum=256, maximum=1024, value=960, step=32, label="Video Width")
                         gr.Markdown(
-                        "ℹ️ Ovi will generate a video at an optimal resolution guided by your selection, using a total budget of 720x720 pixels."                        
+                        "ℹ️ Ovi will generate a video at an optimal resolution guided by your selection, using a total pixel budget."                        
                         )
                     with gr.Group(visible=False) as i2v_info_group:
                         gr.Markdown(
-                            "ℹ️ Video will automatically match the input image's aspect ratio."
+                            "ℹ️ Video will automatically match the input image's aspect ratio, scaled to the selected resolution budget."
                         )
-                        
                     sample_steps = gr.Slider(value=50, label="Sample Steps", precision=0, minimum=5, maximum=100, step=1)
                
                 with gr.Accordion("🎬 Advanced Options", open=False):                    
                     solver_name = gr.Dropdown(
                         choices=["unipc", "euler", "dpm++"], value="unipc", label="Solver Name"
                     )
-
+                    with gr.Row():
+                        resolution_budget = gr.Radio(
+                            ["Standard (720²)", "High (832²)", "Max (960²)"],
+                            value="Standard (720²)",
+                            label="Pixel Budget",
+                            info="Higher budgets offer more detail but use significantly more VRAM."
+                        )                      
+                    with gr.Row():                        
+                        video_duration = gr.Slider(
+                            minimum=1,
+                            maximum=10,
+                            value=5,
+                            step=1,
+                            label="Video Duration (seconds)",
+                            info="Ovi was trained for 5s. 7s is viable. Note that changing this is experimental and may (greatly) reduce coherence."
+                        )
+                    with gr.Row():
+                        use_tiled_vae_checkbox = gr.Checkbox(
+                            label="Use Tiled VAE Decode", 
+                            value=True, 
+                            info="Recommended for GPUs with < 24GB VRAM. Disable for faster decoding on high-VRAM cards."
+                        )
+                        vae_tile_size_slider = gr.Slider( # You probably already have a vae_tile_size slider, just showing for context
+                            minimum=16, maximum=128, value=32, step=16, label="VAE Tile Size"
+                        )                    
                     shift = gr.Slider(minimum=0.5, maximum=20.0, value=5.0, step=1.0, label="Shift")
                     video_guidance_scale = gr.Slider(minimum=0.5, maximum=10.0, value=4.0, step=0.5, label="Video Guidance Scale")
                     audio_guidance_scale = gr.Slider(minimum=0.5, maximum=10.0, value=3.0, step=0.5, label="Audio Guidance Scale")
@@ -424,6 +517,7 @@ with gr.Blocks(css=css) as demo:
 
             with gr.Group(): 
                 with gr.Row():
+                    unload_button = gr.Button("Unload Models 🧠", size="sm") # New button
                     save_button = gr.Button("Save Manually 💾", size="sm", variant="primary")
                     open_folder_button = gr.Button("Open Output Folder 📂", size="sm")
                 autosave_checkbox = gr.Checkbox(label="Autosave Video", value=True)           
@@ -508,10 +602,12 @@ with gr.Blocks(css=css) as demo:
     ).then(
         fn=generate_video,
         inputs=[
-            video_text_prompt, image, video_height, video_width, # <-- ADD video_height and video_width here
+            video_text_prompt, image, video_height, video_width,
             video_seed, solver_name,
             sample_steps, shift, video_guidance_scale, audio_guidance_scale,
-            slg_layer, video_negative_prompt, audio_negative_prompt, autosave_checkbox
+            slg_layer, video_negative_prompt, audio_negative_prompt, autosave_checkbox,
+            resolution_budget, video_duration,
+            use_tiled_vae_checkbox # --- ADD THE CHECKBOX INPUT HERE ---
         ],
         outputs=[output_path]
     )
@@ -527,6 +623,17 @@ with gr.Blocks(css=css) as demo:
         inputs=[],
         outputs=[save_status]
     )
+
+    unload_button.click(
+        fn=unload_models_from_ram, # Use the new function name
+        inputs=[],
+        outputs=[save_status]
+    )
     
 if __name__ == "__main__":
-    demo.launch(share=False)
+    demo.launch(
+    server_name=args.server_name, 
+    server_port=args.server_port,
+    share=args.share, 
+    mcp_server=args.mcp_server,
+)

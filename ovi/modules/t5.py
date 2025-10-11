@@ -493,7 +493,7 @@ class T5EncoderModel:
             return_tokenizer=False,
             dtype=dtype,
             device=device if not cpu_offload else "cpu").eval().requires_grad_(False)
-        logging.info(f'loading {checkpoint_path}')
+        # logging.info(f'loading {checkpoint_path}')
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu', weights_only=True))
         self.model = model
         if shard_fn is not None:

@@ -8,11 +8,15 @@ from ovi.modules.t5 import T5EncoderModel
 from ovi.modules.vae2_2 import Wan2_2_VAE
 from ovi.modules.mmaudio.features_utils import FeaturesUtils
     
-def init_wan_vae_2_2(ckpt_dir, rank=0):
+def init_wan_vae_2_2(ckpt_dir, rank=0, dtype=torch.float): # Add dtype argument with a default
     vae_config = {}
-    vae_config['device'] = rank
     vae_pth = os.path.join(ckpt_dir, "Wan2.2-TI2V-5B/Wan2.2_VAE.pth")
     vae_config['vae_pth'] = vae_pth
+    vae_config['dtype'] = dtype # Pass the dtype into the VAE's config
+    
+    # We also need to ensure the VAE is initialized on the CPU for the manager
+    vae_config['device'] = 'cpu'
+
     vae_model = Wan2_2_VAE(**vae_config)
 
     return vae_model
@@ -28,7 +32,7 @@ def init_mmaudio_vae(ckpt_dir, rank=0):
     vae_config['tod_vae_ckpt'] = tod_vae_ckpt
     vae_config['bigvgan_vocoder_ckpt'] = bigvgan_vocoder_ckpt
 
-    vae = FeaturesUtils(**vae_config).to(rank)
+    vae = FeaturesUtils(**vae_config)
 
     return vae
 
@@ -67,7 +71,7 @@ def init_text_model(ckpt_dir, rank, cpu_offload=False):
     text_encoder = T5EncoderModel(
         text_len=512,
         dtype=torch.bfloat16,
-        device=rank,
+        device='cpu',
         checkpoint_path=text_encoder_path,
         tokenizer_path=text_tokenizer_path,
         cpu_offload=cpu_offload,
@@ -96,6 +100,6 @@ def load_fusion_checkpoint(model, checkpoint_path, from_meta=False):
         del df
         import gc
         gc.collect()
-        print(f"Successfully loaded fusion checkpoint from {checkpoint_path}")
+        # print(f"Successfully loaded fusion checkpoint from {checkpoint_path}")
     else: 
         raise RuntimeError("{checkpoint=} does not exists'")
