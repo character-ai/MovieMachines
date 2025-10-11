@@ -26,3 +26,5 @@ gradio
 open-clip-torch
 protobuf
 sentencepiece
+
+optimum-quanto
