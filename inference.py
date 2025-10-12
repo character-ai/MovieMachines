@@ -108,6 +108,7 @@ def main(config, args):
         # Distribute across SP groups
         this_rank_eval_data = all_eval_data[sp_group_id :: num_sp_groups]
 
+    output_counter=0
     for _, (text_prompt, image_path) in tqdm(enumerate(this_rank_eval_data)):
         video_frame_height_width = config.get("video_frame_height_width", None)
         seed = config.get("seed", 100)
@@ -135,10 +136,11 @@ def main(config, args):
             
             if sp_rank == 0:
                 formatted_prompt = format_prompt_for_filename(text_prompt)
-                output_path = os.path.join(output_dir, f"{formatted_prompt}_{'x'.join(map(str, video_frame_height_width))}_{seed+idx}_{global_rank}.mp4")
+                output_path = os.path.join(output_dir, f"{formatted_prompt}_{'x'.join(map(str, video_frame_height_width))}_{seed+idx}_{global_rank}_{output_counter}.mp4")
                 save_video(output_path, generated_video, generated_audio, fps=24, sample_rate=16000)
                 if generated_image is not None:
                     generated_image.save(output_path.replace('.mp4', '.png'))
+                output_counter=output_counter+1
         
 
 
