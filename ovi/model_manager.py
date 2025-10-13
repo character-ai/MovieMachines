@@ -69,7 +69,26 @@ class ModelManager:
         print("[MEM] All models offloaded. VRAM cleared.")
 
     def clear_all_references(self):
-        """Clears all model references from the manager."""
+        """Clears all model references from the manager with aggressive cleanup."""
         print("[MEM] Clearing all model references from ModelManager.")
+        
+        # First move everything to CPU if not already there
+        for name, model in list(self.models.items()):
+            try:
+                if hasattr(model, 'cpu'):
+                    model.cpu()
+                # Explicitly delete the model reference
+                del model
+            except Exception as e:
+                logging.warning(f"Error clearing model '{name}': {e}")
+        
+        # Clear the dictionary
         self.models.clear()
-        self.active_model_name = None        
+        self.active_model_name = None
+        
+        # Force garbage collection
+        gc.collect()
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()

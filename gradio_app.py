@@ -833,7 +833,7 @@ with gr.Blocks(css=css) as demo:
             
             # --- Bottom Row for Status and File Management ---
             with gr.Row():
-                tb_status_message = gr.Textbox(label="Toolbox Console", lines=4, interactive=False)
+                tb_status_message = gr.Textbox(label="Toolbox Console", lines=8, interactive=False)
             
     gr.HTML(footer_html)
 
@@ -879,9 +879,8 @@ with gr.Blocks(css=css) as demo:
     def send_to_toolbox(video_path):
         if not video_path:
             return gr.update(), gr.update(), '<div style="padding: 8px; background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px; color: #856404;">⚠️ No video to send!</div>'
-        gr.Info("Video sent to Toolbox tab!")
         # Switches to tab 1 (Toolbox) and sets the input video value
-        return gr.update(value=1), video_path, '<div style="padding: 8px; background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 4px; color: #155724;">✅ Video sent to Toolbox!</div>'
+        return gr.update(selected=1), gr.update(value=video_path), '<div style="padding: 8px; background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 4px; color: #155724;">✅ Video sent to Toolbox!</div>'
 
     send_to_toolbox_btn.click(
         fn=send_to_toolbox,

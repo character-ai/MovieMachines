@@ -90,22 +90,72 @@ class OviFusionEngine:
 
     def unload_models(self):
         """Completely removes all models from memory (CPU and GPU)."""
+        import psutil
+        import ctypes
+        
         if not self.models_are_loaded:
             print("[MEM] Models are already unloaded.")
             return
 
+        # Get initial memory usage
+        process = psutil.Process()
+        mem_before_mb = process.memory_info().rss / (1024 * 1024)
+        print(f"[MEM] Current RAM usage: {mem_before_mb:.1f} MB")
         print("[MEM] Unloading all models from RAM...")
+        
+        # First, offload everything from GPU to CPU
+        self.manager.offload_all_models()
+        
+        # Clear all references in the manager
         self.manager.clear_all_references()
         
         # Clear engine's own references
         self.text_model_wrapper = None
+        self.audio_latent_channel = None
+        self.video_latent_channel = None
         
-        # Run Python's garbage collector to reclaim memory
+        # More aggressive garbage collection
+        print("[MEM] Running garbage collection (this may take a moment)...")
+        for _ in range(3):  # Multiple passes help with complex object graphs
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        
+        # Force PyTorch to release memory
+        if torch.cuda.is_available():
+            torch.cuda.ipc_collect()  # Clean up CUDA IPC resources
+        
+        # Try to force Python to release memory to OS (platform-specific)
+        try:
+            if hasattr(ctypes, 'windll'):  # Windows
+                ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
+            elif hasattr(ctypes, 'CDLL'):  # Linux
+                try:
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim(0)
+                except:
+                    pass
+        except Exception as e:
+            print(f"[MEM] Note: Could not force OS memory release: {e}")
+        
+        # Final garbage collection
         gc.collect()
-        torch.cuda.empty_cache()
+        
+        # Check memory after cleanup (wait a moment for OS to process)
+        import time
+        time.sleep(0.5)
+        mem_after_mb = process.memory_info().rss / (1024 * 1024)
+        freed_mb = mem_before_mb - mem_after_mb
+        print(f"[MEM] RAM usage after cleanup: {mem_after_mb:.1f} MB")
+        if freed_mb > 10000:
+            print(f"[MEM] ✅ Freed approximately {freed_mb:.1f} MB of RAM")
+        else:
+            print(f"[MEM] ⚠️ ¸ Only {freed_mb:.1f} MB freed immediately. OS will reclaim more memory gradually.")
+            print(f"[MEM] This is normal - Python holds memory in reserve for performance.")
         
         self.models_are_loaded = False
-        print("[MEM] Models unloaded. System RAM has been freed.")
+        print("[MEM] Models unloaded. Memory cleanup complete.")
     
     @torch.inference_mode()
     def generate(self,
