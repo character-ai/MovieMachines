@@ -28,3 +28,11 @@ protobuf
 sentencepiece
 
 optimum-quanto
+
+# for toolbox
+devicetorch
+psutil
+basicsr
+facexlib>=0.2.5
+gfpgan>=1.3.5
+realesrgan
