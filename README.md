@@ -131,7 +131,7 @@ virtualenv ovi-env
 source ovi-env/bin/activate
 
 # Install PyTorch first
-pip install torch==2.7.0 torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.6.0 torchvision torchaudio
 
 # Install other dependencies
 pip install -r requirements.txt
